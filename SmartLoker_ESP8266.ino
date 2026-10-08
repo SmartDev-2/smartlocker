@@ -5,12 +5,13 @@
 #include <MFRC522.h>
 #include <ESP_Mail_Client.h>
 #include <ArduinoJson.h>
+#include <time.h>
 
 // ======================
 // WIFI
 // ======================
 #define WIFI_SSID "nan"
-#define WIFI_PASSWORD "nando1234567"
+#define WIFI_PASSWORD "ISI_PASSWORD_WIFI"
 
 // ======================
 // FIREBASE
@@ -21,9 +22,11 @@ const char* FIREBASE_HOST = "https://smartlocker-96fe1-default-rtdb.asia-southea
 // EMAIL (SMTP)
 // ======================
 #define SMTP_HOST "smtp.gmail.com"
-#define SMTP_PORT 465
-#define AUTHOR_EMAIL "EMAIL_PENGIRIM@gmail.com" // Ganti dengan email Gmail Anda
-#define AUTHOR_PASSWORD "SANDI_APLIKASI" // Ganti dengan Sandi Aplikasi (App Password) Gmail Anda
+#define SMTP_PORT 465   // jika gagal terus, coba 587
+#define AUTHOR_EMAIL "akunalif774@gmail.com"
+#define AUTHOR_PASSWORD "ISI_APP_PASSWORD_16_KARAKTER"  // tanpa spasi
+
+#define MAX_RECIPIENTS 5
 
 // ======================
 // PIN & HARDWARE
@@ -39,10 +42,14 @@ MFRC522 rfid(SS_PIN, RST_PIN);
 WiFiClientSecure secureClient;
 SMTPSession smtp;
 
+// Jenis notifikasi email
+enum JenisNotif { LOKER_DIBUKA, AKTIVITAS_MENCURIGAKAN };
+
 // Deklarasi fungsi
 void kirimUpdateStatus(String uid);
 bool cekKartuTerdaftar(String uid, String &namaPemilik);
-void ambilEmailDanKirim(String uid, String namaPemilik);
+void kirimNotifikasiEmail(JenisNotif jenis, String uid, String namaPemilik);
+String waktuSekarang();
 void bukaLoker();
 void tolakAkses();
 
@@ -58,10 +65,9 @@ void setup() {
     pinMode(LED_HIJAU_PIN, OUTPUT);
     pinMode(LED_MERAH_PIN, OUTPUT);
 
-    // Kondisi awal (Relay HIGH/LOW disesuaikan dengan jenis relay Anda)
-    digitalWrite(RELAY_PIN, HIGH); // Misal HIGH = Loker Terkunci
+    digitalWrite(RELAY_PIN, HIGH);      // HIGH = terkunci
     digitalWrite(LED_HIJAU_PIN, LOW);
-    digitalWrite(LED_MERAH_PIN, HIGH); // LED Merah menyala standby
+    digitalWrite(LED_MERAH_PIN, HIGH);  // LED merah standby
 
     SPI.begin();
     rfid.PCD_Init();
@@ -71,7 +77,6 @@ void setup() {
 
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Menghubungkan WiFi");
-
     while (WiFi.status() != WL_CONNECTED) {
         Serial.print(".");
         delay(500);
@@ -82,7 +87,7 @@ void setup() {
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
 
-    // Sinkronisasi waktu dari internet (NTP) wajib untuk SSL/TLS Gmail
+    // Sinkronisasi waktu (NTP), wajib untuk SSL/TLS Gmail
     Serial.print("Menyelaraskan waktu");
     configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
     while (time(nullptr) < 100000) {
@@ -91,12 +96,12 @@ void setup() {
     }
     Serial.println("\nWaktu berhasil disinkronisasi!");
 
-    // Penting untuk koneksi ke Firebase (HTTPS)
-    secureClient.setInsecure(); 
+    secureClient.setInsecure();  // koneksi HTTPS ke Firebase
+
+    Serial.printf("Free heap awal: %u bytes\n", ESP.getFreeHeap());
 }
 
 void loop() {
-    // Tunggu ada kartu ditempel
     if (!rfid.PICC_IsNewCardPresent()) return;
     if (!rfid.PICC_ReadCardSerial()) return;
 
@@ -110,91 +115,72 @@ void loop() {
     Serial.print("Kartu Ditempel - UID: ");
     Serial.println(uid);
 
-    // 1. Selalu kirim UID ke Firebase agar Web Laravel bisa mendeteksi saat mau Tambah Kartu
-    updateKartuTerakhir(uid);
+    // 1. Kirim UID ke Firebase (untuk fitur Tambah Kartu di web Laravel)
+    kirimUpdateStatus(uid);
 
-    // 2. Cek apakah kartu terdaftar di Firebase
+    // 2. Cek kartu terdaftar
     String namaPemilik = "";
     if (cekKartuTerdaftar(uid, namaPemilik)) {
         Serial.println("Akses Diberikan untuk: " + namaPemilik);
-        
-        // 3. Update status Firebase menjadi terbuka
-        updateStatusKunci(false);
-        
-        // 4. Buka loker secara fisik (Relay dll) - ini akan menahan selama 5 detik lalu mengunci lagi
+
         bukaLoker();
-        
-        // 5. Update status Firebase menjadi terkunci KEMBALI
-        updateStatusKunci(true);
-        
-        // 6. Ambil daftar email dari Firebase dan kirim notifikasi
-        ambilEmailDanKirim(uid, namaPemilik);
+        kirimNotifikasiEmail(LOKER_DIBUKA, uid, namaPemilik);
     } else {
         Serial.println("Akses Ditolak: Kartu tidak terdaftar.");
+
         tolakAkses();
+        kirimNotifikasiEmail(AKTIVITAS_MENCURIGAKAN, uid, "Tidak dikenal");
     }
 
-    // Halt & Stop Crypto
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
-    delay(2000); // Jeda sebelum bisa scan ulang
+    delay(2000);
 }
 
 // ==========================================
-// FUNGSI: Update Kartu Terakhir ke Firebase (Untuk Web)
+// Update status ke Firebase
 // ==========================================
-void updateKartuTerakhir(String uid) {
+void kirimUpdateStatus(String uid) {
     HTTPClient http;
-    http.begin(secureClient, firebaseURL("/locker_status/kartu_terakhir"));
+    http.begin(secureClient, firebaseURL("/locker_status"));
     http.addHeader("Content-Type", "application/json");
 
-    String payload = "\"" + uid + "\"";
-    int httpCode = http.PUT(payload);
+    StaticJsonDocument<200> doc;
+    doc["terkunci"] = false;
+    doc["kartu_terakhir"] = uid;
+
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+
+    int httpCode = http.PUT(jsonStr);
     if (httpCode > 0) {
-        Serial.println("UID terbaru berhasil diupdate ke Firebase");
+        Serial.println("Status Loker & UID berhasil diupdate ke Firebase");
+    } else {
+        Serial.println("Gagal update status: " + http.errorToString(httpCode));
     }
     http.end();
-    // Tidak perlu memanggil secureClient.stop() di sini jika segera disusul request lain,
-    // tapi aman jika memori terbatas.
+    secureClient.stop();
 }
 
 // ==========================================
-// FUNGSI: Update Status Gembok ke Firebase (Realtime Dashboard)
-// ==========================================
-void updateStatusKunci(bool terkunci) {
-    HTTPClient http;
-    http.begin(secureClient, firebaseURL("/locker_status/terkunci"));
-    http.addHeader("Content-Type", "application/json");
-
-    String payload = terkunci ? "true" : "false";
-    int httpCode = http.PUT(payload);
-    if (httpCode > 0) {
-        Serial.println(terkunci ? "Status Loker: TERKUNCI (Firebase)" : "Status Loker: TERBUKA (Firebase)");
-    }
-    http.end();
-}
-
-// ==========================================
-// FUNGSI: Cek Kartu Terdaftar di Firebase
+// Cek kartu terdaftar di Firebase
 // ==========================================
 bool cekKartuTerdaftar(String uid, String &namaPemilik) {
+    bool terdaftar = false;
+
     HTTPClient http;
     http.begin(secureClient, firebaseURL("/cards"));
     int httpCode = http.GET();
-    
-    bool terdaftar = false;
 
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
-        
+        http.end();
+
         DynamicJsonDocument doc(2048);
         DeserializationError error = deserializeJson(doc, payload);
-        
+
         if (!error && doc.is<JsonObject>()) {
-            JsonObject cards = doc.as<JsonObject>();
-            
-            // Loop semua data kartu di Firebase
-            for (JsonPair kv : cards) {
+            for (JsonPair kv : doc.as<JsonObject>()) {
                 String registeredUid = kv.value()["uid"].as<String>();
                 if (registeredUid == uid) {
                     terdaftar = true;
@@ -203,117 +189,162 @@ bool cekKartuTerdaftar(String uid, String &namaPemilik) {
                 }
             }
         }
+    } else {
+        http.end();
+        Serial.println("Gagal ambil data kartu. HTTP Code: " + String(httpCode));
     }
-    http.end();
+
+    secureClient.stop();
     return terdaftar;
 }
 
 // ==========================================
-// FUNGSI: Ambil Email dan Kirim Notifikasi
+// Waktu sekarang (WIB) untuk isi email
 // ==========================================
-void ambilEmailDanKirim(String uid, String namaPemilik) {
-    HTTPClient http;
-    http.begin(secureClient, firebaseURL("/emails"));
-    int httpCode = http.GET();
-    
-    String payload = "";
-    if (httpCode == HTTP_CODE_OK) {
-        payload = http.getString();
-    }
-    
-    // TUTUP HTTP SEGERA UNTUK MEMBEBASKAN RAM / MEMORI SSL!
-    http.end();
-    
-    if (payload != "") {
-        DynamicJsonDocument doc(2048);
-        DeserializationError error = deserializeJson(doc, payload);
-        
-        if (!error && doc.is<JsonObject>()) {
-            JsonObject emails = doc.as<JsonObject>();
-            
-            // Aktifkan debug SMTP untuk melihat detail error di Serial Monitor jika gagal
-            smtp.debug(1);
-
-            // Konfigurasi SMTP
-            Session_Config config;
-            config.server.host_name = SMTP_HOST;
-            config.server.port = SMTP_PORT;
-            config.login.email = AUTHOR_EMAIL;
-            config.login.password = AUTHOR_PASSWORD;
-            config.login.user_domain = "";
-
-            SMTP_Message message;
-            message.sender.name = "Smart Loker System";
-            message.sender.email = AUTHOR_EMAIL;
-            message.subject = "Pemberitahuan: Loker Dibuka";
-            
-            // Format isi Email
-            String htmlMsg = "<h2>Loker Telah Dibuka</h2><p>Loker baru saja dibuka oleh:</p><ul><li><b>Nama:</b> " + namaPemilik + "</li><li><b>UID:</b> " + uid + "</li></ul>";
-            message.html.content = htmlMsg.c_str();
-
-            // Tambahkan semua email penerima dari Firebase
-            for (JsonPair kv : emails) {
-                String alamat = kv.value()["alamat"].as<String>();
-                message.addRecipient(alamat.c_str(), alamat.c_str());
-                Serial.println("Email penerima ditemukan: " + alamat);
-            }
-
-            // Mulai Kirim Email
-            Serial.println("Menghubungkan ke server SMTP...");
-            if (!smtp.connect(&config)) {
-                Serial.println("Gagal terhubung ke SMTP server.");
-                return;
-            }
-
-            Serial.println("Sedang mengirim email...");
-            if (!MailClient.sendMail(&smtp, &message)) {
-                Serial.println("Error kirim email: " + smtp.errorReason());
-            } else {
-                Serial.println("Email notifikasi berhasil dikirim ke seluruh penerima!");
-            }
-        } else {
-            Serial.println("Gagal parse email dari Firebase (atau kosong).");
-        }
-    } else {
-        Serial.println("Gagal mengambil email dari Firebase. HTTP Code: " + String(httpCode));
-    }
+String waktuSekarang() {
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    char buf[25];
+    strftime(buf, sizeof(buf), "%d-%m-%Y %H:%M:%S", t);
+    return String(buf) + " WIB";
 }
 
 // ==========================================
-// FUNGSI: Aksi Buka Loker
+// Ambil email dari Firebase lalu kirim notifikasi
+// ==========================================
+void kirimNotifikasiEmail(JenisNotif jenis, String uid, String namaPemilik) {
+    String penerima[MAX_RECIPIENTS];
+    int jumlah = 0;
+
+    // TAHAP 1: ambil email dari Firebase, lalu bebaskan semua memori
+    {
+        HTTPClient http;
+        http.begin(secureClient, firebaseURL("/emails"));
+        int httpCode = http.GET();
+
+        if (httpCode == HTTP_CODE_OK) {
+            String payload = http.getString();
+            http.end();
+
+            DynamicJsonDocument doc(1024);
+            if (!deserializeJson(doc, payload) && doc.is<JsonObject>()) {
+                for (JsonPair kv : doc.as<JsonObject>()) {
+                    if (jumlah >= MAX_RECIPIENTS) break;
+                    String alamat = kv.value()["alamat"].as<String>();
+                    if (alamat.length() > 0 && alamat != "null") {
+                        penerima[jumlah++] = alamat;
+                    }
+                }
+            }
+        } else {
+            http.end();
+            Serial.println("Gagal ambil email. HTTP Code: " + String(httpCode));
+        }
+    }
+
+    if (jumlah == 0) {
+        Serial.println("Tidak ada email penerima.");
+        secureClient.stop();
+        return;
+    }
+
+    // TAHAP 2: tutup koneksi SSL Firebase agar heap lega
+    secureClient.stop();
+    delay(200);
+    Serial.printf("Free heap sebelum SMTP: %u bytes\n", ESP.getFreeHeap());
+
+    // TAHAP 3: susun dan kirim email
+    smtp.debug(1);
+
+    Session_Config config;
+    config.server.host_name = SMTP_HOST;
+    config.server.port = SMTP_PORT;
+    config.login.email = AUTHOR_EMAIL;
+    config.login.password = AUTHOR_PASSWORD;
+    config.login.user_domain = "";
+    config.time.ntp_server = "pool.ntp.org,time.nist.gov";
+    config.time.gmt_offset = 7;
+    config.time.day_light_offset = 0;
+
+    SMTP_Message message;
+    message.sender.name = "Smart Loker System";
+    message.sender.email = AUTHOR_EMAIL;
+
+    String htmlMsg;
+    if (jenis == LOKER_DIBUKA) {
+        message.subject = "Pemberitahuan: Loker Dibuka";
+        htmlMsg = "<h2>Loker Telah Dibuka</h2>"
+                  "<p>Loker baru saja dibuka oleh:</p>"
+                  "<ul><li><b>Nama:</b> " + namaPemilik + "</li>"
+                  "<li><b>UID:</b> " + uid + "</li>"
+                  "<li><b>Waktu:</b> " + waktuSekarang() + "</li></ul>";
+    } else {
+        message.subject = "PERINGATAN: Aktivitas Mencurigakan pada Loker";
+        htmlMsg = "<h2 style='color:red;'>Aktivitas Mencurigakan Terdeteksi!</h2>"
+                  "<p>Ada kartu <b>tidak terdaftar</b> yang mencoba membuka loker:</p>"
+                  "<ul><li><b>UID Kartu:</b> " + uid + "</li>"
+                  "<li><b>Waktu:</b> " + waktuSekarang() + "</li>"
+                  "<li><b>Status:</b> Akses ditolak</li></ul>"
+                  "<p>Loker tetap terkunci. Periksa area loker jika diperlukan.</p>";
+    }
+    message.html.content = htmlMsg.c_str();
+
+    for (int i = 0; i < jumlah; i++) {
+        message.addRecipient(penerima[i].c_str(), penerima[i].c_str());
+        Serial.println("Penerima: " + penerima[i]);
+    }
+
+    Serial.println("Menghubungkan ke server SMTP...");
+    if (!smtp.connect(&config)) {
+        Serial.println("Gagal konek SMTP: " + smtp.errorReason());
+        return;
+    }
+
+    Serial.println("Sedang mengirim email...");
+    if (!MailClient.sendMail(&smtp, &message)) {
+        Serial.println("Error kirim email: " + smtp.errorReason());
+    } else {
+        Serial.println("Email notifikasi berhasil dikirim!");
+    }
+
+    smtp.closeSession();
+    Serial.printf("Free heap setelah SMTP: %u bytes\n", ESP.getFreeHeap());
+}
+
+// ==========================================
+// Aksi buka loker
 // ==========================================
 void bukaLoker() {
     digitalWrite(LED_MERAH_PIN, LOW);
     digitalWrite(LED_HIJAU_PIN, HIGH);
-    
-    // Bunyi Beep Berhasil (2x cepat)
+
     tone(BUZZER_PIN, 2000, 100); delay(150);
     tone(BUZZER_PIN, 2000, 100);
-    
-    digitalWrite(RELAY_PIN, LOW); // Loker terbuka (Sesuaikan HIGH/LOW relay)
+
+    digitalWrite(RELAY_PIN, LOW);  // terbuka
     Serial.println("Solenoid Terbuka (5 detik)");
-    delay(5000); // Loker dibiarkan terbuka selama 5 detik
-    
-    digitalWrite(RELAY_PIN, HIGH); // Loker dikunci kembali
+    delay(5000);
+
+    digitalWrite(RELAY_PIN, HIGH);  // terkunci lagi
     Serial.println("Solenoid Dikunci Kembali");
-    
+
     digitalWrite(LED_HIJAU_PIN, LOW);
     digitalWrite(LED_MERAH_PIN, HIGH);
 }
 
 // ==========================================
-// FUNGSI: Aksi Akses Ditolak
+// Aksi akses ditolak
 // ==========================================
 void tolakAkses() {
-    // Bunyi Beep Gagal (panjang)
-    tone(BUZZER_PIN, 500, 1000);
-    
-    // Kedip merah 3x
-    for(int i=0; i<3; i++) {
-        digitalWrite(LED_MERAH_PIN, LOW);
-        delay(200);
-        digitalWrite(LED_MERAH_PIN, HIGH);
-        delay(200);
-    }
-}
+    tone(BUZZER_PIN, 500);
 
+    // Kedip merah selama 5 detik
+    for (int i = 0; i < 10; i++) {
+        digitalWrite(LED_MERAH_PIN, LOW);
+        delay(250);
+        digitalWrite(LED_MERAH_PIN, HIGH);
+        delay(250);
+    }
+
+    noTone(BUZZER_PIN);
+}

@@ -43,8 +43,46 @@
             <section class="bg-white rounded-3xl shadow-sm border border-slate-200/60 overflow-hidden hover:shadow-md transition-shadow flex flex-col h-full">
                 <div class="bg-slate-50/50 p-6 border-b border-slate-100 flex items-center justify-between">
                     <h2 class="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Riwayat Akses Terakhir</h2>
-                    <span class="text-xs font-medium text-slate-500 bg-white px-3 py-1 rounded-full border border-slate-200">{{ count($logs) }} aktivitas</span>
+                    <div class="flex items-center gap-3">
+                        <button onclick="downloadLaporan()" class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-lg border border-indigo-200 transition-colors">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                            Export Laporan
+                        </button>
+                        <span class="text-xs font-medium text-slate-500 bg-white px-3 py-1 rounded-full border border-slate-200" id="log-count">{{ count($logs) }} aktivitas</span>
+                    </div>
                 </div>
+
+                <script>
+                    function downloadLaporan() {
+                        let csv = 'Waktu,Kartu RFID,Hasil,Notifikasi Email\n';
+                        const rows = document.querySelectorAll('#logs-table-body tr');
+                        
+                        if (rows.length === 0 || rows[0].innerText.includes('Belum ada aktivitas')) {
+                            alert('Belum ada data untuk diexport.');
+                            return;
+                        }
+
+                        rows.forEach(row => {
+                            const cols = row.querySelectorAll('td');
+                            if(cols.length === 4) {
+                                const waktu = cols[0].innerText.trim();
+                                const rfid = cols[1].innerText.trim();
+                                const hasil = cols[2].innerText.replace('Akses Diberikan', 'Diberikan').replace('Akses Ditolak', 'Ditolak').trim();
+                                const email = cols[3].innerText.trim();
+                                csv += `"${waktu}","${rfid}","${hasil}","${email}"\n`;
+                            }
+                        });
+
+                        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = 'Laporan_Akses_SmartLoker.csv';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                    }
+                </script>
 
                 <div class="overflow-x-auto p-2 flex-1">
                     <table class="w-full text-sm text-left">
