@@ -101,7 +101,21 @@ void setup() {
     Serial.printf("Free heap awal: %u bytes\n", ESP.getFreeHeap());
 }
 
+unsigned long lastHeartbeat = 0;
+
 void loop() {
+    // Kirim sinyal "Online" (heartbeat) setiap 15 detik
+    if (millis() - lastHeartbeat > 15000 || lastHeartbeat == 0) {
+        lastHeartbeat = millis();
+        HTTPClient http;
+        http.begin(secureClient, firebaseURL("/locker_status/last_ping"));
+        http.addHeader("Content-Type", "application/json");
+        // Kirim UNIX Timestamp saat ini
+        String payload = String(time(nullptr)); 
+        http.PUT(payload);
+        http.end();
+    }
+
     if (!rfid.PICC_IsNewCardPresent()) return;
     if (!rfid.PICC_ReadCardSerial()) return;
 
